@@ -1,4 +1,5 @@
 <?php
+session_start();
 $serverName = "Elijah\\SQLEXPRESS";
 $connectionOptions = [
     "Database" => "LUMIERE",
@@ -410,6 +411,37 @@ $itemsTotal = 0;
             <div class="total-row">
                 <span>Total Amount</span>
                 <span class="total-amount">₱<?= number_format($txn['TOTALAMOUNT'],2) ?></span>
+            </div>
+            <?php 
+            // Initialize variables
+            $cashDisplay = "0.00";
+            $changeDisplay = "0.00";
+
+            // 1. Check if we have Session Data for this specific Transaction
+            if (isset($_SESSION['last_receipt']) && $_SESSION['last_receipt']['id'] == $id) {
+                $cashDisplay = number_format($_SESSION['last_receipt']['cash'], 2);
+                $changeDisplay = number_format($_SESSION['last_receipt']['change'], 2);
+            } 
+            // 2. Fallback: Try to find it in the notes (in case the session expired)
+            elseif ($txn['NOTES'] && strpos($txn['NOTES'], '[Payment Info]') !== false) {
+                preg_match('/Cash: ₱([\d,.]+)/', $txn['NOTES'], $cashMatch);
+                preg_match('/Change: ₱([\d,.]+)/', $txn['NOTES'], $changeMatch);
+                $cashDisplay = $cashMatch[1] ?? "0.00";
+                $changeDisplay = $changeMatch[1] ?? "0.00";
+            }
+
+            // Clean the notes for display (remove the technical tag)
+            $txn['NOTES'] = preg_replace('/\n\[Payment Info\].*$/', '', $txn['NOTES']);
+            ?>
+
+            <div class="d-flex justify-content-between mb-1 text-secondary">
+                <span>Cash Tendered:</span>
+                <span>₱<?= $cashDisplay ?></span>
+            </div>
+
+            <div class="d-flex justify-content-between mb-3 text-success">
+                <span class="fw-bold">Change:</span>
+                <span class="fw-bold">₱<?= $changeDisplay ?></span>
             </div>
         </div>
 

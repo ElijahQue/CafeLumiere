@@ -12,6 +12,7 @@ if ($conn === false) {
     die(print_r(sqlsrv_errors(), true));
 }
 
+// Security Check
 if (!isset($_SESSION['user']) || !in_array($_SESSION['user']['role'], ['admin', 'staff'])) {
     header("Location: login.php");
     exit;
@@ -19,119 +20,100 @@ if (!isset($_SESSION['user']) || !in_array($_SESSION['user']['role'], ['admin', 
 
 if(empty($_SESSION['cart'])) { header('Location: index.php'); exit; }
 
-$discountType = $_SESSION['discount_type'] ?? ($_GET['discount'] ?? null);
-
-if($_SERVER['REQUEST_METHOD'] === 'POST') {
-
-    $customer = [
-        'name' => $_POST['name'] ?? 'Guest',
-        'contact' => $_POST['contact'] ?? '',
-        'notes' => $_POST['notes'] ?? ''
-    ];
-
-    $total = 0;
-    foreach($_SESSION['cart'] as $item) {
-        $total += ($item['price'] * $item['qty']);
-    }
-
-    $serviceCharge = $total * 0.05;
-    $discountPercentage = 0;
-    $discountAmount = 0;
-    
-    if ($discountType) {
-        if ($discountType === 'pwd') {
-            $discountPercentage = 20;
-        } elseif ($discountType === 'senior') {
-            $discountPercentage = 20;
-        }
-        $discountAmount = ($total * $discountPercentage) / 100;
-    }
-
-    $finalTotal = ($total + $serviceCharge) - $discountAmount;
-
-    $customerName = $customer['name'];
-    $contact = $customer['contact'];
-    $notes = $customer['notes'];
-    $totalAmount = $finalTotal;
-    $discountTypeDB = $discountType ?? 'none';
-    $discountAmountDB = $discountAmount;
-    
-    $insertSql = "INSERT INTO TRANSACTIONS (CUSTOMERNAME, CONTACT, TOTALAMOUNT, NOTES, CREATEDAT, STATUS, DISCOUNT_TYPE, DISCOUNT_AMOUNT) OUTPUT INSERTED.TRANSACTIONID VALUES ('$customerName', '$contact', '$totalAmount', '$notes', GETDATE(), 'Pending', '$discountTypeDB', '$discountAmountDB')";
-    $insertResult = sqlsrv_query($conn, $insertSql);
-
-    if ($insertResult === false) {
-        die("Insert failed: " . print_r(sqlsrv_errors(), true));
-    }
-
-    $transactionId = null;
-    if (sqlsrv_has_rows($insertResult)) {
-        $row = sqlsrv_fetch_array($insertResult, SQLSRV_FETCH_ASSOC);
-        if ($row !== false && isset($row['TRANSACTIONID'])) {
-            $transactionId = $row['TRANSACTIONID'];
-        }
-    }
-    
-    if (!$transactionId) {
-        $getIdSql = "SELECT SCOPE_IDENTITY() AS TRANSACTIONID";
-        $getIdResult = sqlsrv_query($conn, $getIdSql);
-        if ($getIdResult !== false) {
-            $idRow = sqlsrv_fetch_array($getIdResult, SQLSRV_FETCH_ASSOC);
-            if ($idRow !== false && isset($idRow['TRANSACTIONID'])) {
-                $transactionId = $idRow['TRANSACTIONID'];
-            }
-        }
-    }
-
-    if (!$transactionId) {
-        die("Failed to get transaction ID. Please check if TRANSACTIONS table has an IDENTITY column.");
-    }
-
-    foreach($_SESSION['cart'] as $it) {
-        $pid = $it['id'];
-        $pname = $it['name'];
-        $price = $it['price'];
-        $qty = $it['qty'];
-
-        $itemSql = "INSERT INTO TRANSACTIONITEMS (TRANSACTIONID, PRODUCTID, PRODUCTNAME, PRICE, QUANTITY) VALUES ('$transactionId', '$pid', '$pname', '$price', '$qty')";
-
-        $itemResult = sqlsrv_query($conn, $itemSql);
-
-        if ($itemResult === false) {
-            die(print_r(sqlsrv_errors(), true));
-        }
-    }
-
-    $_SESSION['last_txn'] = $transactionId;
-    unset($_SESSION['cart']);
-    unset($_SESSION['discount_type']);
-
-    header("Location: receipt.php?id={$transactionId}");
-    exit;
-}
-
+// --- 1. Calculate Totals (Used for both Display and Saving) ---
 $total = 0;
 foreach($_SESSION['cart'] as $item) {
     $total += ($item['price'] * $item['qty']);
 }
 
-$serviceCharge = $total * 0.05;
+$discountType = $_SESSION['discount_type'] ?? ($_GET['discount'] ?? null);
 $discountPercentage = 0;
 $discountAmount = 0;
 $discountLabel = '';
 
 if ($discountType) {
-    if ($discountType === 'pwd') {
-        $discountPercentage = 20;
+    if ($discountType == 'pwd') {
+        $discountPercentage = 0.20; 
         $discountLabel = 'PWD Discount (20%)';
-    } elseif ($discountType === 'senior') {
-        $discountPercentage = 20;
-        $discountLabel = 'Senior Citizen Discount (20%)';
+    } elseif ($discountType == 'senior') {
+        $discountPercentage = 0.20;
+        $discountLabel = 'Senior Discount (20%)';
     }
-    $discountAmount = ($total * $discountPercentage) / 100;
+    $discountAmount = $total * $discountPercentage;
 }
 
-$finalTotal = ($total + $serviceCharge) - $discountAmount;
+$serviceCharge = $total * 0.05;
+$finalTotal = $total + $serviceCharge - $discountAmount; // Variable matches your HTML
+
+// --- 2. Handle Form Submission ---
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+
+    // Capture Cash Input
+    $cashTendered = isset($_POST['cash_tendered']) ? floatval($_POST['cash_tendered']) : 0;
+    
+    // Calculate Change
+    $changeAmount = $cashTendered - $finalTotal;
+    if ($changeAmount < 0) { $changeAmount = 0; }
+
+    // Format the Payment Info String
+    $paymentInfo = "\n[Payment Info] Cash: ₱" . number_format($cashTendered, 2) . " | Change: ₱" . number_format($changeAmount, 2);
+
+    // Prepare Customer Data
+    $customer = [
+        'name' => $_POST['name'] ?? 'Guest',
+        'contact' => $_POST['contact'] ?? '',
+        'notes' => ($_POST['notes'] ?? '') . $paymentInfo // Append payment info to notes
+    ];
+
+    // Database Transaction
+    if (sqlsrv_begin_transaction($conn) === false) {
+        die(print_r(sqlsrv_errors(), true));
+    }
+
+    $sql = "INSERT INTO TRANSACTIONS (CUSTOMERNAME, TOTALAMOUNT, STATUS, CREATEDAT, NOTES, CONTACT) VALUES (?, ?, 'Pending', GETDATE(), ?, ?); SELECT SCOPE_IDENTITY() AS last_id";
+    $params = array($customer['name'], $finalTotal, $customer['notes'], $customer['contact']);
+    
+    $stmt = sqlsrv_query($conn, $sql, $params);
+    
+    if ($stmt === false) {
+        sqlsrv_rollback($conn);
+        die(print_r(sqlsrv_errors(), true));
+    }
+
+    sqlsrv_next_result($stmt);
+    $row = sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC);
+    $transactionId = $row['last_id'];
+
+    $itemsSuccess = true;
+    foreach ($_SESSION['cart'] as $item) {
+        $itemSql = "INSERT INTO TRANSACTIONITEMS (TRANSACTIONID, PRODUCTNAME, QUANTITY, PRICE) VALUES (?, ?, ?, ?)";
+        $itemParams = array($transactionId, $item['name'], $item['qty'], $item['price']);
+        
+        if (!sqlsrv_query($conn, $itemSql, $itemParams)) {
+            $itemsSuccess = false;
+            break;
+        }
+    }
+
+    if ($itemsSuccess) {
+        sqlsrv_commit($conn);
+        
+        // --- NEW: Save Payment Info to Session ---
+        $_SESSION['last_receipt'] = [
+            'id' => $transactionId,
+            'cash' => $cashTendered,
+            'change' => $changeAmount
+        ];
+        // -----------------------------------------
+
+        unset($_SESSION['cart']);
+        unset($_SESSION['discount_type']);
+        header("Location: receipt.php?id=" . $transactionId);
+        exit;
+    }
+}
 ?>
+
 <!doctype html>
 <html lang="en">
 <head>
@@ -152,7 +134,7 @@ $finalTotal = ($total + $serviceCharge) - $discountAmount;
             --swirl-orange: #d2691e;
             --success-green: #28a745;
             --danger-red: #dc3545;
-            --discount-purple: #9c27b0;
+            --discount-purple: #ce8cdaff;
         }
         
         body { 
@@ -541,50 +523,10 @@ $finalTotal = ($total + $serviceCharge) - $discountAmount;
         </style>
 </head>
 <body>
-<div id="stars-container"></div>
 
-<nav class="navbar navbar-expand-lg navbar-dark vangogh-navbar">
-  <div class="container">
-    <a class="navbar-brand" href="index.php">Café Lumière</a>
-    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-      <span class="navbar-toggler-icon"></span>
-    </button>
-    <div class="collapse navbar-collapse" id="navbarNav">
-      <div class="navbar-nav ms-auto align-items-center">
-        <div class="nav-items-container">
-            <?php if(isset($_SESSION['user'])): ?>
-              <span class="user-greeting">
-                <i class="fas fa-user-circle fs-5"></i>
-                <?=htmlspecialchars($_SESSION['user']['username'])?>
-              </span>
-              
-              <a href="logout.php" class="btn-logout-nav">
-                <i class="fas fa-sign-out-alt"></i> Logout
-              </a>
-            <?php else: ?>
-              <a href="login.php" class="btn-logout-nav">
-                <i class="fas fa-sign-in-alt"></i> Login
-              </a>
-            <?php endif; ?>
-            
-            <a href="cart.php" class="btn-cart-nav">
-              <i class="fas fa-shopping-cart"></i> Cart
-            </a>
-        </div>
-      </div>
-    </div>
-  </div>
-</nav>
-
-<div class="container py-4">
-    <div class="hero-section">
-        <h1 class="hero-title">
-            <i class="fas fa-cash-register me-2"></i>
-            Checkout
-        </h1>
-        <p class="hero-subtitle">Finalize your masterpiece order</p>
-    </div>
-
+<div class="container my-5">
+    <h2 class="text-center mb-4" style="font-family: 'Playfair Display', serif; color: #f4c542;">Complete Your Order</h2>
+    
     <form method="POST">
         <div class="row">
             <div class="col-lg-7 mb-4">
@@ -593,17 +535,15 @@ $finalTotal = ($total + $serviceCharge) - $discountAmount;
                     <div class="mb-3">
                         <label class="form-label">Customer Name *</label>
                         <input type="text" name="name" class="form-control" required 
-                               placeholder="Enter your name" value="<?= htmlspecialchars($_SESSION['user']['name'] ?? '') ?>">
+                               placeholder="Enter your name" value="<?= htmlspecialchars($_SESSION['user']['username'] ?? '') ?>">
                     </div>
                     <div class="mb-3">
                         <label class="form-label">Contact Number (Optional)</label>
-                        <input type="text" name="contact" class="form-control" 
-                               placeholder="Enter contact number">
+                        <input type="text" name="contact" class="form-control" placeholder="Enter contact number">
                     </div>
                     <div class="mb-3">
                         <label class="form-label">Special Instructions / Notes</label>
-                        <textarea name="notes" class="form-control" rows="4" 
-                                  placeholder="Any special requests or notes for this order..."></textarea>
+                        <textarea name="notes" class="form-control" rows="4" placeholder="Any special requests..."></textarea>
                     </div>
 
                     <?php if (!$discountType): ?>
@@ -632,50 +572,72 @@ $finalTotal = ($total + $serviceCharge) - $discountAmount;
                     <h3 class="summary-title"><i class="fas fa-receipt me-2"></i>Order Summary</h3>
                     
                     <?php if ($discountType): ?>
-                        <div class="text-center">
-                            <span class="discount-badge">
-                                <?php if ($discountType === 'pwd'): ?>
-                                    <i class="fas fa-wheelchair me-1"></i> PWD Discount Applied
-                                <?php elseif ($discountType === 'senior'): ?>
-                                    <i class="fas fa-user-check me-1"></i> Senior Discount Applied
-                                <?php endif; ?>
+                        <div class="text-center mb-3">
+                            <span class="badge bg-warning text-dark">
+                                <i class="fas fa-tag me-1"></i> <?= $discountLabel ?> Applied
                             </span>
                         </div>
                     <?php endif; ?>
 
                     <div class="order-items mb-3" style="max-height: 300px; overflow-y: auto;">
                         <?php foreach($_SESSION['cart'] as $item): ?>
-                        <div class="summary-item">
-                            <div class="item-name">
+                        <div class="d-flex justify-content-between mb-2 border-bottom border-secondary pb-2">
+                            <div>
                                 <?= htmlspecialchars($item['name']) ?> 
                                 <span class="text-warning small">x<?= $item['qty'] ?></span>
                             </div>
-                            <div class="item-price">₱<?= number_format($item['price'] * $item['qty'], 2) ?></div>
+                            <div>₱<?= number_format($item['price'] * $item['qty'], 2) ?></div>
                         </div>
                         <?php endforeach; ?>
                     </div>
 
-                    <div class="total-row">
-                        <span class="text-white-50">Subtotal</span>
-                        <span class="text-white">₱<?= number_format($total, 2) ?></span>
+                    <div class="d-flex justify-content-between text-white-50">
+                        <span>Subtotal</span>
+                        <span>₱<?= number_format($total, 2) ?></span>
                     </div>
-                    <div class="total-row border-0 mt-0 pt-1">
-                        <span class="text-white-50">Service Charge (5%)</span>
-                        <span class="text-white">₱<?= number_format($serviceCharge, 2) ?></span>
+                    <div class="d-flex justify-content-between text-white-50">
+                        <span>Service Charge (5%)</span>
+                        <span>₱<?= number_format($serviceCharge, 2) ?></span>
                     </div>
                     
                     <?php if ($discountAmount > 0): ?>
-                    <div class="total-row border-0 mt-0 pt-1">
-                        <span style="color: var(--discount-purple);">
-                            <i class="fas fa-tag me-1"></i><?= $discountLabel ?>
-                        </span>
-                        <span style="color: var(--discount-purple);">-₱<?= number_format($discountAmount, 2) ?></span>
+                    <div class="d-flex justify-content-between text-info">
+                        <span>Discount</span>
+                        <span>-₱<?= number_format($discountAmount, 2) ?></span>
                     </div>
                     <?php endif; ?>
 
-                    <div class="grand-total">
-                        <span class="grand-total-label">Total Amount</span>
-                        <span class="grand-total-amount">₱<?= number_format($finalTotal, 2) ?></span>
+                    <hr class="border-secondary">
+
+                    <div class="d-flex justify-content-between mb-3">
+                        <span class="h5">Total Amount:</span>
+                        <span class="h5 text-warning" id="finalTotalDisplay">
+                            ₱<?= number_format($finalTotal, 2); ?>
+                        </span>
+                        <input type="hidden" id="rawTotal" value="<?= $finalTotal ?>">
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="cashInput" class="form-label">Cash Tendered (₱)</label>
+                        <div class="input-group">
+                            <span class="input-group-text bg-dark text-light border-secondary">₱</span>
+                            <input type="number" 
+                                   class="form-control" 
+                                   id="cashInput" 
+                                   name="cash_tendered" 
+                                   step="0.01" 
+                                   min="0" 
+                                   placeholder="Enter amount given" 
+                                   required>
+                        </div>
+                        <div id="paymentFeedback" class="form-text text-danger" style="display:none;">
+                            <i class="fas fa-exclamation-circle"></i> Insufficient payment amount.
+                        </div>
+                    </div>
+
+                    <div class="alert alert-dark border-secondary d-flex justify-content-between align-items-center">
+                        <span>Change:</span>
+                        <span class="h4 mb-0 text-success" id="changeDisplay">₱0.00</span>
                     </div>
 
                     <button type="submit" class="btn btn-action">
@@ -683,7 +645,7 @@ $finalTotal = ($total + $serviceCharge) - $discountAmount;
                     </button>
                     
                     <div class="text-center mt-3">
-                        <a href="cart.php" class="btn-back">
+                        <a href="cart.php" class="text-white-50 text-decoration-none">
                             <i class="fas fa-arrow-left me-1"></i>Back to Cart
                         </a>
                     </div>
@@ -691,115 +653,75 @@ $finalTotal = ($total + $serviceCharge) - $discountAmount;
             </div>
         </div>
     </form>
-    <footer class="footer text-center mt-5">
-        <div class="container">
-            <div class="row align-items-center">
-                <div class="col-md-6 text-md-start">
-                    <h4 class="text-warning mb-3">Café Lumière</h4>
-                    <p class="mb-0">Inspired by Vincent van Gogh's passion for color and life.</p>
-                </div>
-                <div class="col-md-6 text-md-end mt-3 mt-md-0">
-                    <p class="mb-0">
-                        <i class="fas fa-map-marker-alt text-warning me-2"></i>
-                        JP Laurel St. Nasugbu, Batangas
-                    </p>
-                    <p class="mb-0">
-                        <i class="fas fa-clock text-warning me-2"></i>
-                        Open Daily: 7AM - 10PM
-                    </p>
-                </div>
-            </div>
-            <hr class="my-3" style="border-color: rgba(244, 197, 66, 0.2);">
-            <div class="row">
-                <div class="col-12">
-                    <p class="mb-0">
-                        <small>
-                            &copy; <?php echo date('Y'); ?> Café Lumière.
-                        </small>
-                    </p>
-                </div>
-            </div>
-        </div>
-    </footer>
 </div>
 
-
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-document.addEventListener('DOMContentLoaded', function() {
-    const starsContainer = document.getElementById('stars-container');
-    const starCount = 150;
-    
-    for (let i = 0; i < starCount; i++) {
-        const star = document.createElement('div');
-        star.classList.add('star-decoration');
-        star.style.left = `${Math.random() * 100}%`;
-        star.style.top = `${Math.random() * 100}%`;
-        const size = Math.random() * 3 + 1;
-        star.style.width = `${size}px`;
-        star.style.height = `${size}px`;
-        star.style.animationDelay = `${Math.random() * 3}s`;
-        star.style.animationDuration = `${Math.random() * 2 + 2}s`;
-        starsContainer.appendChild(star);
-    }
-
-    const cards = document.querySelectorAll('.checkout-card');
-    cards.forEach((card, index) => {
-        card.style.opacity = '0';
-        card.style.transform = 'translateY(20px)';
-        setTimeout(() => {
-            card.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
-            card.style.opacity = '1';
-            card.style.transform = 'translateY(0)';
-        }, index * 200);
-    });
-});
-
-document.querySelector('form').addEventListener('submit', function(e) {
-    const nameInput = document.querySelector('input[name="name"]');
-    if (!nameInput.value.trim()) {
-        e.preventDefault();
-        nameInput.focus();
-        nameInput.style.borderColor = '#ff6b6b';
-        nameInput.style.boxShadow = '0 0 0 0.25rem rgba(255, 107, 107, 0.25)';
-        alert('Please enter customer name.');
-        return false;
-    }
-});
-
+// Your Discount Logic
 function applyDiscount(type) {
-    const discountTypeInput = document.getElementById('discountType');
-    if (discountTypeInput) {
-        discountTypeInput.value = type;
-        const form = document.createElement('form');
-        form.method = 'POST';
-        form.style.display = 'none';
-        form.action = 'cart.php';
-        const actionInput = document.createElement('input');
-        actionInput.type = 'hidden';
-        actionInput.name = 'action';
-        actionInput.value = 'apply_discount';
-        const discountInput = document.createElement('input');
-        discountInput.type = 'hidden';
-        discountInput.name = 'discount_type';
-        discountInput.value = type;
-        form.appendChild(actionInput);
-        form.appendChild(discountInput);
-        document.body.appendChild(form);
-        const discountName = type === 'pwd' ? 'PWD' : 'Senior Citizen';
-        if (confirm(`Apply ${discountName} discount (20%) to your order?`)) {
-            form.submit();
-        }
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.style.display = 'none';
+    form.action = 'cart.php'; // Assuming cart.php handles setting the discount session
+
+    const actionInput = document.createElement('input');
+    actionInput.type = 'hidden';
+    actionInput.name = 'action';
+    actionInput.value = 'apply_discount';
+
+    const discountInput = document.createElement('input');
+    discountInput.type = 'hidden';
+    discountInput.name = 'discount_type';
+    discountInput.value = type;
+
+    form.appendChild(actionInput);
+    form.appendChild(discountInput);
+    document.body.appendChild(form);
+    
+    if (confirm('Apply discount?')) {
+        form.submit();
     }
 }
 
-<?php if ($discountType && !isset($_POST['discount_type'])): ?>
-    const discountTypeInput = document.getElementById('discountType');
-    if (discountTypeInput) {
-        discountTypeInput.value = '<?php echo $discountType; ?>';
+// Payment Calculation Logic
+document.addEventListener('DOMContentLoaded', function() {
+    const cashInput = document.getElementById('cashInput');
+    const changeDisplay = document.getElementById('changeDisplay');
+    const rawTotal = parseFloat(document.getElementById('rawTotal').value);
+    const feedback = document.getElementById('paymentFeedback');
+    const submitBtn = document.querySelector('button[type="submit"]');
+
+    function calculateChange() {
+        const cashGiven = parseFloat(cashInput.value);
+
+        if (isNaN(cashGiven)) {
+            changeDisplay.textContent = '₱0.00';
+            changeDisplay.classList.remove('text-success', 'text-danger');
+            return;
+        }
+
+        const change = cashGiven - rawTotal;
+
+        if (change >= 0) {
+            changeDisplay.textContent = '₱' + change.toFixed(2);
+            changeDisplay.classList.remove('text-danger');
+            changeDisplay.classList.add('text-success');
+            feedback.style.display = 'none';
+            cashInput.classList.remove('is-invalid');
+            cashInput.classList.add('is-valid');
+            submitBtn.disabled = false;
+        } else {
+            changeDisplay.textContent = 'Insufficient';
+            changeDisplay.classList.remove('text-success');
+            changeDisplay.classList.add('text-danger');
+            feedback.style.display = 'block';
+            cashInput.classList.add('is-invalid');
+            cashInput.classList.remove('is-valid');
+            submitBtn.disabled = true;
+        }
     }
-<?php endif; ?>
+
+    cashInput.addEventListener('input', calculateChange);
+});
 </script>
 </body>
 </html>

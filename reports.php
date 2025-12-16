@@ -50,6 +50,10 @@ $monthSql = "SELECT SUM(TOTALAMOUNT) as month_sales FROM TRANSACTIONS WHERE MONT
 $monthResult = sqlsrv_query($conn, $monthSql);
 $month = sqlsrv_fetch_array($monthResult, SQLSRV_FETCH_ASSOC);
 
+$weekSql = "SELECT SUM(TOTALAMOUNT) as week_sales FROM TRANSACTIONS WHERE DATEPART(week, CREATEDAT) = DATEPART(week, GETDATE()) AND YEAR(CREATEDAT) = YEAR(GETDATE())";
+$weekResult = sqlsrv_query($conn, $weekSql);
+$week = sqlsrv_fetch_array($weekResult, SQLSRV_FETCH_ASSOC);
+
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
 $limit = 10;
 $offset = ($page - 1) * $limit;
@@ -522,6 +526,11 @@ $pageTitle = "Sales Analytics • Café Lumière";
             <div class="stat-icon"><i class="fas fa-calendar-day"></i></div>
             <div class="stat-value">₱<?php echo number_format($today['today_sales'] ?? 0, 2); ?></div>
             <div class="stat-label">Today's Sales</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon"><i class="fas fa-calendar-alt"></i></div>
+            <div class="stat-value">₱<?php echo number_format($week['week_sales'] ?? 0, 2); ?></div>
+            <div class="stat-label">Weekly Revenue</div>
         </div>
         <div class="stat-card">
             <div class="stat-icon"><i class="fas fa-calendar-alt"></i></div>
